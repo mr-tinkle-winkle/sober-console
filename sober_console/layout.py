@@ -115,6 +115,13 @@ def overlay_rect(anchor: str, off_x: int, off_y: int, width_pct: int, height_pct
     return Rect(int(x), int(y), int(w), int(h))
 
 
-def layer_margins(rect: Rect, screen: Rect) -> "tuple[int, int]":
-    """(top, left) margins of a top|left-anchored layer surface placing ``rect`` on ``screen``."""
-    return rect.y - screen.y, rect.x - screen.x
+def anchor_for_rect(rect: Rect, ref: Rect) -> "tuple[str, int, int]":
+    """The inverse of ``overlay_rect``: (anchor, off_x, off_y) that puts a rectangle of this size
+    where ``rect`` is, measured from the nearest corner of ``ref``.  Used to remember where the
+    overlay was dragged to -- anchoring to a corner keeps it sensible if Sober's window changes."""
+    right = rect.cx > ref.cx
+    bottom = rect.cy > ref.cy
+    off_x = (ref.x + ref.w - (rect.x + rect.w)) if right else (rect.x - ref.x)
+    off_y = (ref.y + ref.h - (rect.y + rect.h)) if bottom else (rect.y - ref.y)
+    anchor = f"{'bottom' if bottom else 'top'}-{'right' if right else 'left'}"
+    return anchor, int(off_x), int(off_y)

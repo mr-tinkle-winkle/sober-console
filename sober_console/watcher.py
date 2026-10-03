@@ -36,10 +36,28 @@ def ui_command() -> "list[str]":
     return [sys.executable, "-m", "sober_console", "run"]
 
 
+def _lock_path() -> Path:
+    base = os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir()
+    return Path(base) / f"sober-console-watch-{os.getuid()}.lock"
+
+
+def is_running() -> bool:
+    """Is a watcher (``sober-console watch``) currently running for this user?"""
+    try:
+        fh = open(_lock_path(), "a")
+    except OSError:
+        return False
+    try:
+        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return True                        # someone else holds the lock
+    fcntl.flock(fh, fcntl.LOCK_UN)
+    return False
+
+
 def acquire_lock():
     """Only one watcher per user.  Returns the open lock file, or None if one is running."""
-    base = os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir()
-    fh = open(Path(base) / f"sober-console-watch-{os.getuid()}.lock", "w")
+    fh = open(_lock_path(), "w")
     try:
         fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:

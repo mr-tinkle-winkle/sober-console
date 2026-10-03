@@ -40,6 +40,9 @@ class Config:
     height_pct: int = 55
     follow_window: bool = True        # place relative to Sober's window (else the whole monitor)
 
+    hide_when_unfocused: bool = True  # hide while another window is active -- only when the overlay is
+                                      #   on Sober's monitor; it comes back when Sober is focused again
+
     # --- look ---------------------------------------------------------------------------
     opacity_pct: int = 94
     font_size: int = 10

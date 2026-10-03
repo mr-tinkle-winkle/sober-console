@@ -319,11 +319,11 @@ def test_toggle_key_during_a_busy_probe_is_not_dropped(console, monkeypatch):
     app, _ = console
     app.cfg.focus_check = "kdotool"
     app._kdotool_ok = True
-    monkeypatch.setattr(app.probe, "request", lambda: False)             # worker busy with a tracking probe
+    monkeypatch.setattr(app.probe, "request", lambda full=True: False)             # worker busy with a tracking probe
     app._on_key()
     assert app._pending_toggle                                           # remembered, not dropped
     sober_win = focus.WindowInfo(wid="{1}", wclass="org.vinegarhq.Sober", pid=None, geometry=(10, 20, 800, 600))
-    app._on_probe(sober_win)                                             # the in-flight probe lands
+    app._on_probe(sober_win, True)                                             # the in-flight probe lands
     assert app.overlay.isVisible() and not app._pending_toggle
     assert app.sober_rect == Rect(10, 20, 800, 600)
 
@@ -332,7 +332,7 @@ def test_toggle_key_is_ignored_when_another_window_is_focused(console):
     app, _ = console
     app._kdotool_ok = True
     app._pending_toggle = True
-    app._on_probe(focus.WindowInfo(wid="{2}", wclass="firefox", name="Mozilla Firefox", geometry=(0, 0, 100, 100)))
+    app._on_probe(focus.WindowInfo(wid="{2}", wclass="firefox", name="Mozilla Firefox", geometry=(0, 0, 100, 100)), True)
     assert not app.overlay.isVisible()
     assert app.sober_rect is None                    # a non-Sober window must not move the overlay
 
@@ -340,7 +340,7 @@ def test_toggle_key_is_ignored_when_another_window_is_focused(console):
 def test_failed_focus_detection_is_surfaced_in_the_overlay(console):
     app, _ = console
     app._pending_toggle = True
-    app._on_probe(None)
+    app._on_probe(None, True)
     assert not app.overlay.isVisible()
     assert "sober-console focus" in app.overlay.notice.text()
 
@@ -351,3 +351,234 @@ def test_overlay_open_with_keyboard_focus_closes_on_toggle_key(console, monkeypa
     monkeypatch.setattr(type(app.overlay), "isActiveWindow", lambda self: True)
     app._on_key()
     assert not app.overlay.isVisible()
+
+
+# ---- drag, remembered position, KDE-shortcut flash, hide-when-unfocused ----------------------------------
+from PySide6.QtCore import QPoint, Qt  # noqa: E402
+
+from sober_console.layout import ScreenInfo  # noqa: E402
+
+
+def _layer_overlay(qapp):
+    cfg = config.Config().sanitize()
+    ov = ConsoleOverlay(cfg, ConsoleModel(from_config(cfg)))
+    ov.set_layer_mode(True)
+    ov.resize(2560, 1440)                       # a monitor-sized surface
+    ov.set_panel_rect(100, 80, 1000, 600)
+    ov.show()
+    return ov
+
+
+def test_layer_mode_panel_sits_inside_a_monitor_sized_window_and_only_it_takes_input(qapp):
+    ov = _layer_overlay(qapp)
+    pump(30)
+    assert ov.frame.geometry().getRect() == (100, 80, 1000, 600)
+    assert ov.panel_geometry() == (100, 80, 1000, 600)
+    mask = ov.windowHandle().mask().boundingRect()
+    assert mask.getRect() == (100, 80, 1000, 600)           # input region = the panel only
+    ov.close()
+
+
+def test_dragging_the_header_moves_the_panel_clamps_it_and_reports_once(qapp):
+    ov = _layer_overlay(qapp)
+    done = []
+    ov.dragFinished.connect(lambda: done.append(ov.panel_geometry()))
+    ov._drag_start(QPoint(500, 100))
+    ov._drag_move(QPoint(700, 160))
+    assert ov.panel_geometry()[:2] == (300, 140) and ov.windowHandle().mask().boundingRect().x() == 300
+    assert ov.dragging
+    ov._drag_move(QPoint(500 + 5000, 100 + 5000))           # far outside: stays on the monitor
+    assert ov.panel_geometry()[:2] == (2560 - 1000, 1440 - 600)
+    ov._drag_end()
+    assert not ov.dragging and done == [(1560, 840, 1000, 600)]
+    ov._drag_start(QPoint(1, 1))                            # a click without movement isn't a move
+    ov._drag_end()
+    assert len(done) == 1
+    ov.close()
+
+
+def test_header_mouse_events_drag(qapp):
+    from PySide6.QtCore import QEvent, QPointF
+    from PySide6.QtGui import QMouseEvent
+    ov = _layer_overlay(qapp)
+    from sober_console.ui import DragHeader
+    header = ov.findChild(DragHeader)
+    ev = lambda t, x, y, b=Qt.MouseButton.LeftButton: QMouseEvent(  # noqa: E731
+        t, QPointF(5, 5), QPointF(x, y), b, b, Qt.KeyboardModifier.NoModifier)
+    QApplication.sendEvent(header, ev(QEvent.Type.MouseButtonPress, 300, 100))
+    QApplication.sendEvent(header, ev(QEvent.Type.MouseMove, 340, 130))
+    QApplication.sendEvent(header, ev(QEvent.Type.MouseButtonRelease, 340, 130))
+    assert ov.panel_geometry()[:2] == (140, 110)
+    ov.close()
+
+
+class TwoScreenApp:
+    """ConsoleApp whose _screens() reports Sober's monitor on the right, like the user's setup."""
+
+    @staticmethod
+    def make(qapp, tmp_path, monkeypatch, **cfg_kw):
+        monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+        (tmp_path / "logs").mkdir(exist_ok=True)
+        cfg = config.Config(log_dir=str(tmp_path / "logs"), **cfg_kw).sanitize()
+        app = ConsoleApp(cfg, standalone=True, use_layer=False)
+        left = ScreenInfo("DP-1", Rect(0, 0, 1920, 1080), True)
+        right = ScreenInfo("HDMI-A-1", Rect(2560, 0, 2560, 1440))
+        real = QGuiApplication.primaryScreen()
+        monkeypatch.setattr(app, "_screens", lambda: ([left, right], {"DP-1": real, "HDMI-A-1": real}))
+        app._kdotool_ok = True
+        requests = []
+        monkeypatch.setattr(app.probe, "request", lambda full=True: requests.append(full) or True)
+        return app, requests
+
+
+def _sober_info(wid="{sober}", geom=(2560, 0, 2560, 1440)):
+    return focus.WindowInfo(wid=wid, wclass="org.vinegarhq.Sober", name="Roblox", pid=7, geometry=geom)
+
+
+def _other_info(wid="{konsole}"):
+    return focus.WindowInfo(wid=wid, wclass="konsole", name="Terminal", pid=99, geometry=(0, 0, 800, 600))
+
+
+@pytest.fixture
+def two(qapp, tmp_path, monkeypatch):
+    monkeypatch.setattr("sober_console.sober.pids", lambda *a: {7})
+    app, requests = TwoScreenApp.make(qapp, tmp_path, monkeypatch)
+    yield app, requests
+    app.hide_overlay()
+
+
+def test_first_show_from_a_shortcut_waits_for_sobers_position_instead_of_guessing(two):
+    """The KDE-shortcut bug: with no known Sober position the overlay was placed on the wrong
+    monitor, then moved (hide + show) when the probe answered -- and vanished."""
+    app, requests = two
+    shown_on = []
+    real_show = app.overlay.show
+    app.overlay.show = lambda: (shown_on.append(app._applied[0]), real_show())[1]
+    app.request_show()                                   # what `sober-console toggle` does
+    assert requests == [True] and not app.overlay.isVisible()       # asked where Sober is; not shown yet
+    app._on_probe(_sober_info(), True)
+    assert app.overlay.isVisible() and shown_on == ["HDMI-A-1"]     # shown once, on Sober's monitor
+    assert app._remapping is False
+
+
+def test_show_after_probe_has_a_timeout_fallback(two):
+    app, _ = two
+    app.request_show()
+    app._show_fallback()
+    assert app.overlay.isVisible()
+
+
+def test_second_show_with_known_position_is_immediate(two):
+    app, requests = two
+    app.sober_rect = Rect(2560, 0, 2560, 1440)
+    app.request_show()
+    assert app.overlay.isVisible() and requests == []
+
+
+def test_toggle_twice_via_shortcut_ends_hidden_not_stuck(two):
+    app, _ = two
+    app.sober_rect = Rect(2560, 0, 2560, 1440)
+    app.toggle()
+    assert app.overlay.isVisible()
+    app.toggle()
+    assert not app.overlay.isVisible() and not app._wanted
+
+
+def test_overlay_hides_when_another_window_is_active_and_returns_with_sober(two):
+    app, _ = two
+    app.sober_rect = Rect(2560, 0, 2560, 1440)
+    app.request_show()
+    app._on_probe(_sober_info(), True)
+    assert app.overlay.isVisible()
+    app._on_probe(_other_info(), True)
+    assert not app.overlay.isVisible() and app._auto_hidden and app._wanted
+    app._on_probe(_other_info(), False)                      # cheap id-only polls keep it hidden
+    assert not app.overlay.isVisible()
+    app._on_probe(focus.WindowInfo(wid="{sober}"), False)    # id seen before -> known to be Sober
+    assert app.overlay.isVisible() and not app._auto_hidden
+
+
+def test_unknown_window_id_triggers_one_full_probe_before_deciding(two):
+    app, requests = two
+    app.sober_rect = Rect(2560, 0, 2560, 1440)
+    app.request_show()
+    requests.clear()
+    app._on_probe(focus.WindowInfo(wid="{brand-new}"), False)
+    assert requests == [True] and app.overlay.isVisible()    # not hidden on a guess
+
+
+def test_manual_hide_is_not_undone_by_regaining_focus(two):
+    app, _ = two
+    app.sober_rect = Rect(2560, 0, 2560, 1440)
+    app.request_show()
+    app.hide_overlay()
+    app._on_probe(_sober_info(), True)
+    assert not app.overlay.isVisible()
+
+
+def test_overlay_on_the_other_monitor_stays_up_when_sober_loses_focus(qapp, tmp_path, monkeypatch):
+    monkeypatch.setattr("sober_console.sober.pids", lambda *a: {7})
+    app, _ = TwoScreenApp.make(qapp, tmp_path, monkeypatch, monitor="DP-1")
+    app.sober_rect = Rect(2560, 0, 2560, 1440)
+    app.request_show()
+    assert app._applied[0] == "DP-1"
+    app._on_probe(_other_info(), True)
+    assert app.overlay.isVisible()
+    app.hide_overlay()
+
+
+def test_setting_off_keeps_it_up_and_turning_it_off_brings_it_back(two):
+    app, _ = two
+    app.sober_rect = Rect(2560, 0, 2560, 1440)
+    app.cfg.hide_when_unfocused = False
+    app.request_show()
+    app._on_probe(_other_info(), True)
+    assert app.overlay.isVisible()
+    app.cfg.hide_when_unfocused = True
+    app._on_probe(_other_info(), True)
+    assert app._auto_hidden
+    app.cfg.hide_when_unfocused = False
+    app._on_setting("hide_when_unfocused")
+    assert app.overlay.isVisible() and not app._auto_hidden
+
+
+def test_f9_toggle_still_requires_sober_focus_and_hides_when_open(two):
+    app, _ = two
+    app.sober_rect = Rect(2560, 0, 2560, 1440)
+    app._pending_toggle = True
+    app._on_probe(_other_info(), True)
+    assert not app._wanted                                   # F9 in another window: ignored
+    app._pending_toggle = True
+    app._on_probe(_sober_info(), True)
+    assert app.overlay.isVisible()
+    app._pending_toggle = True
+    app._on_probe(_sober_info(), True)
+    assert not app.overlay.isVisible()
+
+
+def test_drag_result_is_saved_as_anchor_and_offsets_and_reapplied(two, tmp_path):
+    app, _ = two
+    app.sober_rect = Rect(2560, 0, 2560, 1440)
+    app.request_show()
+    app.overlay.move(2560 + 1200, 300)                       # (plain-window mode: window == panel)
+    app._on_drag_finished()
+    c = app.cfg
+    w = app.overlay.width()
+    assert c.anchor == "top-left" and (c.offset_x, c.offset_y) == (1200, 300) or c.anchor.endswith("right")
+    app._save()
+    saved = config.load(config.config_path())
+    assert (saved.anchor, saved.offset_x, saved.offset_y) == (c.anchor, c.offset_x, c.offset_y)
+    rect_after = app._applied[1]
+    app._place(initial=True)
+    assert app._applied[1] == rect_after                     # re-placing lands where it was dropped
+    assert w == rect_after.w
+
+
+def test_settings_page_has_the_hide_toggle_wired_to_config(overlay):
+    page = overlay.settings_page
+    assert page.hide_unfocused.isChecked()
+    got = []
+    overlay.settingChanged.connect(got.append)
+    page.hide_unfocused.setChecked(False)
+    assert overlay.cfg.hide_when_unfocused is False and "hide_when_unfocused" in got

@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from sober_console import config, focus, sober
-from sober_console.layout import (Rect, ScreenInfo, layer_margins, overlay_rect, pick_screen,
+from sober_console.layout import (Rect, ScreenInfo, anchor_for_rect, overlay_rect, pick_screen,
                                   reference_rect, screen_of)
 
 LEFT = ScreenInfo("DP-1", Rect(0, 0, 1920, 1080), primary=True)
@@ -63,8 +63,48 @@ def test_overlay_rect_is_clamped_onto_the_monitor_and_min_size():
     assert tiny.w >= 360 and tiny.h >= 220
 
 
-def test_layer_margins_are_relative_to_the_target_monitor():
-    assert layer_margins(Rect(2020, 40, 500, 400), RIGHT.rect) == (40, 100)
+def test_anchor_for_rect_picks_the_nearest_corner_with_offsets_from_it():
+    ref = Rect(1920, 0, 2560, 1440)
+    assert anchor_for_rect(Rect(1940, 30, 500, 400), ref) == ("top-left", 20, 30)
+    assert anchor_for_rect(Rect(4000, 30, 400, 300), ref) == ("top-right", 80, 30)
+    assert anchor_for_rect(Rect(1930, 1000, 400, 300), ref) == ("bottom-left", 10, 140)
+    assert anchor_for_rect(Rect(4000, 1000, 400, 300), ref) == ("bottom-right", 80, 140)
+
+
+def test_dragged_position_round_trips_through_overlay_rect():
+    ref = Rect(1920, 0, 2560, 1440)
+    for dropped in (Rect(2100, 200, 1178, 792), Rect(3200, 600, 1178, 792), Rect(1920, 648, 1178, 792),
+                    Rect(3302, 0, 1178, 792), Rect(2900, 300, 1178, 792)):
+        anchor, ox, oy = anchor_for_rect(dropped, ref)
+        # same size again (46% x 55% of ref), as the app does after a drag
+        again = overlay_rect(anchor, ox, oy, 46, 55, ref, ref)
+        assert (again.x, again.y) == (dropped.x, dropped.y), (dropped, anchor, ox, oy)
+
+
+def test_dragged_position_follows_a_different_sized_reference():
+    # dropped in the top-right corner of a 2560-wide Sober window; later Sober is 1280 wide:
+    # it should still hug the top-right corner of the window
+    anchor, ox, oy = anchor_for_rect(Rect(2560 - 1178 - 16, 16, 1178, 792), Rect(0, 0, 2560, 1440))
+    small = overlay_rect(anchor, ox, oy, 46, 55, Rect(0, 0, 1280, 720), Rect(0, 0, 1280, 720))
+    assert small.x + small.w == 1280 - 16 and small.y == 16
+
+
+# ---- hide when Sober isn't the active window --------------------------------------------------------
+def _hide(**kw):
+    base = dict(enabled=True, sober_focused=False, overlay_screen="HDMI-A-1", sober_screen="HDMI-A-1",
+                overlay_active=False)
+    base.update(kw)
+    return focus.should_auto_hide(**base)
+
+
+def test_auto_hide_only_on_a_positive_sighting_of_another_window_on_sobers_monitor():
+    assert _hide() is True
+    assert _hide(sober_focused=True) is False
+    assert _hide(sober_focused=None) is False                  # couldn't read the window: don't guess
+    assert _hide(enabled=False) is False                       # the Settings toggle
+    assert _hide(overlay_screen="DP-1") is False               # overlay on the other monitor stays up
+    assert _hide(sober_screen=None) is False                   # don't know where Sober is
+    assert _hide(overlay_active=True) is False                 # the overlay itself holds the keyboard
 
 
 # ---- kdotool parsing (assumed output layout; see focus.py) ----------------------------------------
@@ -112,6 +152,15 @@ def test_default_log_dir():
 
 
 # ---- config ------------------------------------------------------------------------------
+def test_hide_when_unfocused_defaults_on_and_is_a_bool_setting(tmp_path):
+    assert config.Config().hide_when_unfocused is True
+    f = tmp_path / "c.toml"
+    f.write_text("hide_when_unfocused = false\n")
+    assert config.load(f).hide_when_unfocused is False
+    f.write_text('hide_when_unfocused = "no"\n')
+    assert config.load(f).hide_when_unfocused is True           # wrong type -> default
+
+
 def test_config_roundtrip_and_defaults(tmp_path):
     p = tmp_path / "c.toml"
     assert config.load(p) == config.Config().sanitize()               # missing file -> defaults

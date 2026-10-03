@@ -2,7 +2,7 @@ import os
 import subprocess
 import sys
 
-from sober_console import cli, report
+from sober_console import cli, report, watcher
 from sober_console.watcher import RESPAWN_DELAY, Watcher, ui_command
 
 
@@ -137,10 +137,40 @@ def test_inspect_command_runs_end_to_end(tmp_path, monkeypatch, capsys):
     assert "Top source tags" in capsys.readouterr().out
 
 
+def test_watcher_lock_reports_whether_a_watcher_is_running(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+    assert not watcher.is_running()
+    held = watcher.acquire_lock()
+    assert held is not None and watcher.is_running()
+    assert watcher.acquire_lock() is None                    # a second watcher can't start
+    held.close()
+    assert not watcher.is_running()
+
+
+def _explain(monkeypatch, tmp_path, sober_up, watcher_up):
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+    monkeypatch.setattr("sober_console.sober.running", lambda *a: sober_up)
+    monkeypatch.setattr("sober_console.watcher.is_running", lambda: watcher_up)
+    return cli._explain_no_overlay()
+
+
+def test_no_overlay_message_says_which_part_is_missing(monkeypatch, tmp_path):
+    # the case from real use: Sober is open, but the watcher had been stopped with Ctrl-C
+    msg = _explain(monkeypatch, tmp_path, sober_up=True, watcher_up=False)
+    assert "nothing is watching" in msg and "sober-console watch" in msg
+    assert "will start it once Sober opens" in _explain(monkeypatch, tmp_path, False, True)
+    assert "hasn't started yet" in _explain(monkeypatch, tmp_path, True, True)
+    both_down = _explain(monkeypatch, tmp_path, False, False)
+    assert "Sober is closed" in both_down and "watcher isn't running" in both_down
+
+
 def test_control_commands_report_when_nothing_is_running(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+    monkeypatch.setattr("sober_console.sober.running", lambda *a: True)
+    monkeypatch.setattr("sober_console.watcher.is_running", lambda: False)
     assert cli.main(["toggle"]) == 1
-    assert "not running" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert err.startswith("sober-console: ") and "nothing is watching" in err
 
 
 def test_config_path_command(tmp_path, monkeypatch, capsys):

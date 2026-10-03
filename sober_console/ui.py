@@ -16,8 +16,8 @@ Design constraints that come from being a layer-shell surface:
 """
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFontDatabase, QGuiApplication, QTextCharFormat, QTextCursor
+from PySide6.QtCore import QPoint, QRect, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QFontDatabase, QGuiApplication, QRegion, QTextCharFormat, QTextCursor
 from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QFrame, QHBoxLayout, QLabel,
                                QLineEdit, QPlainTextEdit, QPushButton, QScrollArea,
                                QStackedWidget, QVBoxLayout, QWidget)
@@ -160,6 +160,38 @@ class Stepper(QWidget):
         self.label.setText(f"{self._value}{self._suffix}")
         self.minus.setEnabled(self._value > self._lo)
         self.plus.setEnabled(self._value < self._hi)
+
+
+class DragHeader(QWidget):
+    """The title bar.  Dragging any part of it that isn't a button moves the overlay."""
+
+    pressed = Signal(QPoint)       # global position
+    moved = Signal(QPoint)
+    released = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setCursor(Qt.CursorShape.SizeAllCursor)
+        self._down = False
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton:
+            self._down = True
+            self.pressed.emit(e.globalPosition().toPoint())
+            e.accept()
+        else:
+            super().mousePressEvent(e)
+
+    def mouseMoveEvent(self, e):
+        if self._down:
+            self.moved.emit(e.globalPosition().toPoint())
+            e.accept()
+
+    def mouseReleaseEvent(self, e):
+        if self._down and e.button() == Qt.MouseButton.LeftButton:
+            self._down = False
+            self.released.emit()
+            e.accept()
 
 
 class LogView(QPlainTextEdit):
@@ -390,6 +422,15 @@ class SettingsPage(QWidget):
         self.follow = QCheckBox("Place relative to Sober's window  (off: the whole monitor)")
         self.follow.toggled.connect(lambda c: self._set("follow_window", c))
         col.addWidget(self.follow)
+        drag_note = QLabel("Drag the title bar to move the overlay; the new position is saved here "
+                           "(anchor and offsets).")
+        drag_note.setObjectName("dim")
+        drag_note.setWordWrap(True)
+        col.addWidget(drag_note)
+        self.hide_unfocused = QCheckBox("Hide while Sober isn't the active window  (only when the overlay "
+                                        "is on Sober's monitor)")
+        self.hide_unfocused.toggled.connect(lambda c: self._set("hide_when_unfocused", c))
+        col.addWidget(self.hide_unfocused)
 
         col.addWidget(_section("LOOK"))
         self.opacity_pct = spin("opacity_pct", 30, 100, 5, " %")
@@ -443,6 +484,7 @@ class SettingsPage(QWidget):
         for name in ("offset_x", "offset_y", "width_pct", "height_pct", "opacity_pct", "font_size"):
             getattr(self, name).setValue(getattr(c, name))
         self.follow.setChecked(c.follow_window)
+        self.hide_unfocused.setChecked(c.hide_when_unfocused)
         self.show_tags.setChecked(c.show_tags)
         self.keyboard.set_value(c.keyboard)
         self.auto_copy.setChecked(c.auto_copy)
@@ -457,6 +499,7 @@ class ConsoleOverlay(QWidget):
     clearRequested = Signal()
     settingChanged = Signal(str)
     rebindRequested = Signal()
+    dragFinished = Signal()
 
     def __init__(self, cfg, model, parent=None):
         super().__init__(parent)
@@ -474,11 +517,14 @@ class ConsoleOverlay(QWidget):
         self._f_count.setForeground(QColor(LEVEL_COLOR["warning"]))
         self._f_level = {lv: self._fmt(LEVEL_COLOR[lv]) for lv in LEVELS}
 
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0)
-        self.frame = QFrame()
+        # The panel (``frame``) is positioned by hand: in layer mode the window covers the whole
+        # monitor and the panel sits inside it (see set_panel_rect); otherwise it fills the window.
+        self._layer = False
+        self._panel = QRect()
+        self._drag: "tuple | None" = None
+        self.dragging = False
+        self.frame = QFrame(self)
         self.frame.setObjectName("frame")
-        outer.addWidget(self.frame)
         body = QVBoxLayout(self.frame)
         body.setContentsMargins(0, 0, 0, 0)
         body.setSpacing(0)
@@ -500,6 +546,77 @@ class ConsoleOverlay(QWidget):
         self.filters_page.load()
         self.settings_page.load()
 
+    # -- panel placement / dragging ------------------------------------------------------------
+    def set_layer_mode(self, on: bool) -> None:
+        self._layer = on
+        self._relayout()
+
+    def set_panel_rect(self, x: int, y: int, w: int, h: int) -> None:
+        """Layer mode: where the panel sits inside the (full-monitor) window."""
+        self._panel = QRect(x, y, w, h)
+        self._relayout()
+
+    def panel_geometry(self) -> "tuple[int, int, int, int]":
+        """(x, y, w, h): in the window (layer mode) or the window's own geometry (plain window)."""
+        r = self._panel if self._layer else self.geometry()
+        return r.x(), r.y(), r.width(), r.height()
+
+    def _relayout(self) -> None:
+        if self._layer and not self._panel.isNull():
+            self.frame.setGeometry(self._panel)
+        else:
+            self.frame.setGeometry(self.rect())
+        self._update_mask()
+
+    def _update_mask(self) -> None:
+        """Layer mode: only the panel takes pointer input; the rest of the monitor-sized surface is
+        click-through (Qt's Wayland plugin turns a window mask into the surface's input region)."""
+        handle = self.windowHandle()
+        if handle is None:
+            return
+        if self._layer and not self._panel.isNull():
+            handle.setMask(QRegion(self._panel))
+        else:
+            handle.setMask(QRegion())
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._relayout()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._update_mask()
+        QTimer.singleShot(0, self._update_mask)         # the native surface exists by now
+
+    def _drag_start(self, gpos: QPoint) -> None:
+        start = self._panel.topLeft() if self._layer else self.pos()
+        self._drag = (gpos, QPoint(start), False)
+        self.dragging = True
+
+    def _drag_move(self, gpos: QPoint) -> None:
+        if self._drag is None:
+            return
+        origin, start, _ = self._drag
+        target = start + (gpos - origin)
+        if self._layer:
+            w, h = self._panel.width(), self._panel.height()
+            target.setX(max(0, min(target.x(), self.width() - w)))        # keep the panel on its monitor
+            target.setY(max(0, min(target.y(), self.height() - h)))
+            if target != self._panel.topLeft():
+                self._panel.moveTo(target)
+                self._relayout()
+                self._drag = (origin, start, True)
+        else:
+            self.move(target)
+            self._drag = (origin, start, True)
+
+    def _drag_end(self) -> None:
+        moved = self._drag is not None and self._drag[2]
+        self._drag = None
+        self.dragging = False
+        if moved:
+            self.dragFinished.emit()
+
     # -- construction ------------------------------------------------------------------------
     @staticmethod
     def _fmt(color: str) -> QTextCharFormat:
@@ -508,8 +625,11 @@ class ConsoleOverlay(QWidget):
         return f
 
     def _build_header(self) -> QWidget:
-        header = QWidget()
+        header = DragHeader()
         header.setObjectName("header")
+        header.pressed.connect(self._drag_start)
+        header.moved.connect(self._drag_move)
+        header.released.connect(self._drag_end)
         header.setFixedHeight(38)
         row = QHBoxLayout(header)
         row.setContentsMargins(8, 4, 8, 4)

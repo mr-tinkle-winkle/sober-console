@@ -55,8 +55,6 @@ def _load():
             lib = ctypes.CDLL(str(path))
             lib.sober_console_configure.argtypes = [ctypes.c_void_p] + [ctypes.c_int] * 6
             lib.sober_console_configure.restype = ctypes.c_int
-            lib.sober_console_set_margins.argtypes = [ctypes.c_void_p] + [ctypes.c_int] * 4
-            lib.sober_console_set_margins.restype = ctypes.c_int
             lib.sober_console_set_keyboard.argtypes = [ctypes.c_void_p, ctypes.c_int]
             lib.sober_console_set_keyboard.restype = ctypes.c_int
             _lib = lib
@@ -88,23 +86,20 @@ def _ptr(window):
         return None
 
 
-def configure(window, top: int, left: int, keyboard: int) -> bool:
-    """Make the (created, not yet shown) QWindow a top|left-anchored overlay-layer surface
-    placed ``top``/``left`` px from its screen's corner."""
+def configure(window, keyboard: int) -> bool:
+    """Make the (created, not yet shown) QWindow an overlay-layer surface that covers its whole
+    output (all four edges anchored, no margins, exclusive zone -1 so panels don't shrink it).
+    The visible panel is drawn inside it and the rest is click-through (see ui.ConsoleOverlay), so
+    dragging only moves a widget -- never a layer-shell margin."""
     lib = _load()
     ptr = _ptr(window) if lib is not None and window is not None else None
     if ptr is None:
         return False
-    rc = lib.sober_console_configure(ptr, ANCHOR_TOP | ANCHOR_LEFT, int(top), 0, 0, int(left), int(keyboard))
+    anchors = ANCHOR_TOP | ANCHOR_BOTTOM | ANCHOR_LEFT | ANCHOR_RIGHT
+    rc = lib.sober_console_configure(ptr, anchors, 0, 0, 0, 0, int(keyboard))
     if rc != 0:
         logger.warning("layer-shell configure failed (rc=%s)", rc)
     return rc == 0
-
-
-def set_margins(window, top: int, left: int) -> bool:
-    lib = _load()
-    ptr = _ptr(window) if lib is not None and window is not None else None
-    return ptr is not None and lib.sober_console_set_margins(ptr, int(top), 0, 0, int(left)) == 0
 
 
 def set_keyboard(window, keyboard: int) -> bool:

@@ -84,6 +84,32 @@ def query_active(timeout: float = 3.0) -> "WindowInfo | None":
     return parse_probe(out.stdout)
 
 
+def query_active_id(timeout: float = 2.0) -> "WindowInfo | None":
+    """Cheap probe: only the active window's id (one kdotool call, ~1/5 of ``query_active``).
+    Callers map the id to an earlier full probe's verdict."""
+    if not kdotool_available():
+        return None
+    try:
+        out = subprocess.run(["kdotool", "getactivewindow"], capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    wid = out.stdout.strip()
+    if out.returncode != 0 or not wid:
+        return None
+    return WindowInfo(wid=wid, raw=out.stdout)
+
+
+def should_auto_hide(*, enabled: bool, sober_focused: "bool | None", overlay_screen: "str | None",
+                     sober_screen: "str | None", overlay_active: bool) -> bool:
+    """Hide the overlay because Sober isn't the active window?  Only on a *positive* sighting of
+    another window (``sober_focused is False``; None = couldn't tell), only when the overlay is
+    on the same monitor as Sober (on another monitor it stays up), and never while the overlay
+    itself holds the keyboard."""
+    if not enabled or sober_focused is not False or overlay_active:
+        return False
+    return bool(overlay_screen) and overlay_screen == sober_screen
+
+
 def is_sober_window(info: "WindowInfo | None", sober_pids: "set[int]", window_match: str) -> bool:
     if info is None:
         return False

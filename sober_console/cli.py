@@ -11,10 +11,28 @@ from pathlib import Path
 from . import __version__, ipc
 
 
+def _explain_no_overlay() -> str:
+    """The overlay process isn't running -- say which part of the chain is actually missing
+    (this is NOT the same as "Sober isn't running")."""
+    from . import sober, watcher
+
+    sober_up, watcher_up = sober.running(), watcher.is_running()
+    if watcher_up and sober_up:
+        return ("Sober is running but the overlay hasn't started yet (the watcher checks every 2s). "
+                "If this persists, see: journalctl --user -u sober-console")
+    if watcher_up:
+        return "the overlay isn't running because Sober isn't; the watcher will start it once Sober opens."
+    if sober_up:
+        return ("Sober is running, but nothing is watching for it, so the overlay never started. "
+                "Start the watcher with `sober-console watch` (or `systemctl --user start sober-console`).")
+    return ("the overlay isn't running: Sober is closed and the watcher isn't running either. "
+            "Start the watcher with `sober-console watch`, or enable services.sober-console.")
+
+
 def _cmd_control(command: str) -> int:
     reply = ipc.send_command(command)
     if reply is None:
-        print("sober-console is not running (it starts by itself while Sober is open).", file=sys.stderr)
+        print(f"sober-console: {_explain_no_overlay()}", file=sys.stderr)
         return 1
     print(reply)
     return 0

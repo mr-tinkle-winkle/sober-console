@@ -19,6 +19,11 @@ NixOS system flake.
   window is the focused one before toggling.
 - **Overlays Sober.** It is a layer-shell `overlay` surface (the same mechanism as afterglow's
   clip indicator), so it sits above a fullscreen game. It is placed relative to Sober's window.
+- **Drag it by the title bar.** The position is remembered (saved as anchor + offsets, see
+  Placement).
+- **Hides when Sober isn't the active window** -- but only if the overlay is on Sober's monitor;
+  on another monitor it stays up. It comes back when Sober is focused again. Toggle in
+  Settings (`hide_when_unfocused`).
 - **Looks like the dev console:** dark panel, "Developer Console" header, colour-coded Messages /
   Info / Warnings / Errors, timestamps.
 - **Takes the mouse while hovered.** Wheel scrolling and clicks over the overlay go to it, not
@@ -79,6 +84,10 @@ sober-console config path    # where the config file is
 `toggle` works regardless of focus, so a KDE custom shortcut running `sober-console toggle` is
 the fallback if F9 detection ever misbehaves.
 
+**Don't bind the KDE shortcut to the same key as `toggle_key`** (F9 by default): the overlay
+reads that key itself, so both would fire and the second one closes what the first opened.
+Use a different key for the shortcut, or just use F9 without one.
+
 ### Tabs
 
 - **Client Log** -- the log, with level checkboxes (Messages / Info / Warnings / Errors) and a
@@ -119,6 +128,21 @@ on Sober's monitor, otherwise the whole monitor.
 - **Offset X / Y** in pixels from that anchor, **Width / Height** as a % of the reference area.
 - **Place relative to Sober's window** off = relative to the whole monitor instead.
 
+**Dragging:** grab the title bar (anywhere that isn't a button) and move it. On release the
+position is saved as the nearest corner of the reference area plus offsets from it, so the
+Anchor / Offset steppers update to match and it lands in the same place next time (and keeps
+hugging that corner if Sober's window is a different size). The size still comes from Width /
+Height. In layer-shell mode the overlay is a transparent monitor-sized surface with only the
+panel receiving input, so clicks outside the panel go straight to the game.
+
+**Hide when Sober isn't the active window** (Settings, on by default): checked about once a
+second with a single cheap `kdotool getactivewindow` call (a full probe only for a window not
+seen before, and every few seconds for Sober's position). It hides only when it positively sees
+another window active, only when the overlay is on Sober's monitor, and never while the overlay
+itself has the keyboard. Hiding this way is automatic: it reappears when Sober is focused again,
+whereas closing it yourself (F9, the x button, `sober-console hide`) stays closed until you open
+it again. Turn the setting off to skip the polling entirely.
+
 The overlay never leaves its monitor. Defaults (top-left, 16 px in, 46% x 55%) are a **guess** at
 where Roblox puts its own console -- I couldn't confirm the real position -- so adjust to taste.
 
@@ -136,7 +160,8 @@ to defaults, numbers are clamped. `sober-console reload` re-reads it.
 | `window_match` | `"sober\|roblox"` | regex matched against the focused window's class / title |
 | `keyboard` | `"on_demand"` | `"never"`: never take keyboard focus from Sober |
 | `auto_copy` | `false` | copy selected text on mouse release |
-| `monitor`, `anchor`, `offset_x`, `offset_y`, `width_pct`, `height_pct`, `follow_window` | see above | placement |
+| `monitor`, `anchor`, `offset_x`, `offset_y`, `width_pct`, `height_pct`, `follow_window` | see above | placement (`anchor` / offsets are what dragging writes) |
+| `hide_when_unfocused` | `true` | hide while another window is active (only on Sober's monitor) |
 | `opacity_pct`, `font_size`, `show_tags` | `94`, `10`, `false` | look |
 | `log_dir` | `""` | empty = `~/.var/app/org.vinegarhq.Sober/data/sober/sober_logs` |
 | `max_lines`, `display_max` | `20000`, `5000` | lines kept / lines drawn |
@@ -172,7 +197,7 @@ deciding what to mute.
 Written and tested **without access to a Wayland/KDE session, a Sober install, a real Sober log,
 input devices, or a working Nix build**. Honest breakdown:
 
-**Tested (105 automated tests, plus rendered screenshots of every page):**
+**Tested (126 automated tests, plus rendered screenshots of every page):**
 log parsing across the formats it knows, all filter logic, the ring buffer and de-duplication, log
 tailing (rotation, truncation, partial lines, symlinks), placement/monitor maths, config
 load/save/repair, the watcher's start/stop/respawn rules, the CLI and control socket (including a
@@ -198,7 +223,19 @@ key's logic with fake devices.
   Plasma should provide.
 - **Pointer lock.** If a game locks the mouse pointer (first-person / shift-lock), no overlay can
   receive clicks or scrolls until the pointer is free again (e.g. open the Esc menu).
-- **Dragging the overlay** is not implemented; position it with the Settings steppers.
+- **Dragging and click-through.** Dragging moves a widget inside a monitor-sized layer surface and
+  updates the window mask. That the mask becomes the Wayland input region (so clicks outside the
+  panel reach the game) follows how afterglow's indicator works but was only checked against
+  Qt's API here, not on KWin. If clicks outside the panel *don't* reach the game while the overlay
+  is open, that's the bug to report.
+- **The KDE-shortcut flash.** Diagnosed from the code, not reproduced: with no known Sober
+  position the first `toggle` placed the overlay on the wrong monitor, then moved it (unmap and
+  map again) when the focus probe answered. It now asks for Sober's position first, and any later
+  monitor change unmaps and re-maps after a short delay. If it still misbehaves,
+  `journalctl --user -u sober-console -f` shows each show / hide with the reason.
+- **Auto-hide.** The decision logic is tested with fake probe results; the real thing depends on
+  `kdotool getactivewindow` reporting the right window as focus moves around, including when the
+  overlay itself has taken keyboard focus.
 
 ## Development
 
