@@ -1,0 +1,23 @@
+[project]
+name = "sober-console"
+version = "0.1.0"
+description = "An F9-style log overlay for Sober (Roblox on Linux): live log, filters, copy, per-monitor placement"
+requires-python = ">=3.11"
+dependencies = [
+    "PySide6",
+    "evdev",
+    "tomli_w",
+]
+
+[project.scripts]
+sober-console = "sober_console.cli:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["sober_console*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
